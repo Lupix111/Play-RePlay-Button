@@ -75,6 +75,7 @@ On the second button press, the Pico reads the stored file back line by line, `d
 Because `input_forwarder.py` has no GUI and creates no window, running it in the background never steals focus or interrupts whatever is on screen, including full-screen applications and games. To have it start automatically without any visible window:
 
 - **Windows**: run it with `pythonw.exe` instead of `python.exe` (no console window at all), or package it with `pyinstaller --noconsole --onefile`. Add it to Task Scheduler with an "At log on" trigger for full automation.
+  //NOT TESTED ON THESE SYSTEMS, MIGHT NOT WORK!
 - **macOS**: use a [LaunchAgent](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) (`~/Library/LaunchAgents/*.plist`) to start it at login.
 - **Linux**: use a systemd user service, or simply `nohup python3 input_forwarder.py --port /dev/ttyACM0 &`.
 
