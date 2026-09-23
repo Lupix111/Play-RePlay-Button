@@ -61,10 +61,8 @@ void setup() {
   pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(PLAY_BUTTON_PIN, INPUT_PULLUP);
 
-  Serial.begin(9600);
-  // Give the OS a moment to actually open the CDC port before we print,
-  // so these diagnostic lines aren't lost if you attach a terminal right
-  // after a fresh upload/reset.
+  Serial.begin(115200);
+
   Serial.println("[boot] Serial up");
 
   Keyboard.begin();
@@ -94,8 +92,8 @@ void setSolidColor(uint8_t r, uint8_t g, uint8_t b) {
   pixel.show();
 }
 
-// Non-blocking "breathing" blue pulse, driven entirely off millis() so it
-// never interferes with button polling or the recording/playback timing.
+// Non-blocking breathing blue pulse, driven entirely off millis() so it
+// never interferes with button polling or the recording/playback timing
 void updateIdlePulse() {
   float phase = (millis() % IDLE_PULSE_PERIOD_MS) / (float)IDLE_PULSE_PERIOD_MS;
   float wave = (sin(phase * 2.0 * PI) + 1.0) / 2.0;  // 0.0 .. 1.0
@@ -135,7 +133,7 @@ void handleRecordButton() {
 }
 
 // Reads whatever is available on Serial and appends complete lines
-// to the macro file while a recording is in progress.
+// to the macro file while a recording is in progress
 void captureSerialToFile() {
   static String lineBuffer;
   while (Serial.available() > 0) {
@@ -266,7 +264,7 @@ void playRecordingOnce(bool &stopRequested) {
 
 void stopPlayback() {
   // Release everything, in case playback was interrupted mid-press
-  // (avoids "stuck" keys or held mouse buttons).
+  // (avoids "stuck" keys or held mouse buttons)
   Keyboard.releaseAll();
   Mouse.release(MOUSE_LEFT);
   Mouse.release(MOUSE_RIGHT);
