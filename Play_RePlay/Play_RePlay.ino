@@ -1,59 +1,31 @@
-/*
- * pico_macro_recorder.ino
- * ------------------------
- * Board:  Raspberry Pi Pico (RP2040), Arduino-Pico core by Earle Philhower
- * Role:   USB composite device (Serial CDC + Keyboard + Mouse HID)
- *
- * Behavior:
- *   - Button 1 (RECORD_BUTTON_PIN): first press starts recording
- *       -> sends "REC:1" over Serial (tells the PC-side Python script to
- *          start forwarding captured keyboard/mouse events)
- *       -> every line received afterward on Serial is appended to a file
- *          on LittleFS, already timestamped by the PC script.
- *     Second press stops recording
- *       -> sends "REC:0" (Python script stops forwarding)
- *       -> closes the file.
- *
- *   - Button 2 (PLAY_BUTTON_PIN): replays the last recorded macro using
- *     Keyboard.h and Mouse.h, respecting the millisecond delays stored
- *     with each event.
- *
- * Expected line formats received over Serial while recording:
- *   K,<1|0>,<hex_keycode>,<delta_ms>          e.g. K,1,61,0
- *   M,MOVE,<dx>,<dy>,<delta_ms>                e.g. M,MOVE,12,-4,8
- *   M,CLICK,<left|right|middle>,<1|0>,<delta_ms>
- *   M,SCROLL,<dy>,<delta_ms>
- *
- * Notes:
- *   - Mouse.move() is RELATIVE, so dx/dy must already be relative deltas
- *     (the companion Python script computes these, not absolute coords).
- *   - Keyboard.press()/release() accept a single byte: either a plain
- *     ASCII character for printable keys, or one of the special HID
- *     codes defined in Keyboard.h (0x80+) for modifiers/function keys.
- *     The Python script already sends the correct byte as 2 hex chars.
- *   - Reserve enough flash for LittleFS via Tools > Flash Size in the
- *     Arduino IDE board menu (the default split is usually fine for
- *     macros of a few hundred thousand events; increase it if needed).
- */
-
+//Made with love by Emanuele Carlino
 #include <Keyboard.h>
 #include <Mouse.h>
 #include <LittleFS.h>
+#include <Adafruit_NeoPixel.h>
+#include <math.h>
 
-//pin configuration 
-const int RECORD_BUTTON_PIN = 22;   // Button 1: start/stop recording
-const int PLAY_BUTTON_PIN   = 23;   // Button 2: play last recording
+const int LED_PIN = 23;
+const int LED_COUNT = 1;
+Adafruit_NeoPixel pixel(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+const uint8_t IDLE_MAX_BRIGHTNESS = 255;   // 0-255, kept low so idle breathing isn't blinding
+const unsigned long IDLE_PULSE_PERIOD_MS = 1000;  // full breathe in/out cycle
+
+// ---------------- Pin configuration ----------------
+const int RECORD_BUTTON_PIN = 5;   // Button 1: start/stop recording
+const int PLAY_BUTTON_PIN   = 22;   // Button 2: play last recording
 
 const unsigned long DEBOUNCE_MS = 50;
 const char* MACRO_FILE_PATH = "/macro.txt";
 
-//state machine 
+// ---------------- State machine ----------------
 enum SystemState { STATE_IDLE, STATE_RECORDING, STATE_PLAYING };
 SystemState currentState = STATE_IDLE;
 
 File macroFile;
 
-//debounced button helper 
+// ---------------- Debounced button helper ----------------
 struct DebouncedButton {
   int pin;
   int lastReading;
@@ -84,29 +56,62 @@ bool buttonPressedEdge(DebouncedButton &btn) {
   return edge;
 }
 
-//Setup
+// ---------------- Setup ----------------
 void setup() {
   pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(PLAY_BUTTON_PIN, INPUT_PULLUP);
 
-  Serial.begin(115200);
-  Keyboard.begin();
-  Mouse.begin();
+  Serial.begin(9600);
+  // Give the OS a moment to actually open the CDC port before we print,
+  // so these diagnostic lines aren't lost if you attach a terminal right
+  // after a fresh upload/reset.
+  Serial.println("[boot] Serial up");
 
+  Keyboard.begin();
+  Serial.println("[boot] Keyboard.begin() done");
+  Mouse.begin();
+  Serial.println("[boot] Mouse.begin() done");
+
+  pixel.begin();
+  Serial.println("[boot] pixel.begin() done");
+  pixel.show();  // off until the first loop() iteration sets the idle pulse
+  Serial.println("[boot] pixel.show() done");
+
+  Serial.println("[boot] mounting LittleFS...");
   if (!LittleFS.begin()) {
     // First boot / corrupted filesystem: format once and retry.
+    Serial.println("[boot] mount failed, formatting (can take a while on large flash)...");
     LittleFS.format();
+    Serial.println("[boot] format complete, remounting...");
     LittleFS.begin();
   }
+  Serial.println("[boot] setup() complete, entering loop()");
 }
 
-//#########################Recording controls
+// ---------------- LED feedback ----------------
+void setSolidColor(uint8_t r, uint8_t g, uint8_t b) {
+  pixel.setPixelColor(0, pixel.Color(r, g, b));
+  pixel.show();
+}
+
+// Non-blocking "breathing" blue pulse, driven entirely off millis() so it
+// never interferes with button polling or the recording/playback timing.
+void updateIdlePulse() {
+  float phase = (millis() % IDLE_PULSE_PERIOD_MS) / (float)IDLE_PULSE_PERIOD_MS;
+  float wave = (sin(phase * 2.0 * PI) + 1.0) / 2.0;  // 0.0 .. 1.0
+  uint8_t brightness = (uint8_t)(wave * IDLE_MAX_BRIGHTNESS);
+  pixel.setPixelColor(0, pixel.Color(0, 0, brightness));
+  pixel.show();
+}
+
+
 void startRecording() {
   if (LittleFS.exists(MACRO_FILE_PATH)) {
     LittleFS.remove(MACRO_FILE_PATH);
   }
   macroFile = LittleFS.open(MACRO_FILE_PATH, "w");
   currentState = STATE_RECORDING;
+  setSolidColor(255, 0, 0);  // solid red while recording
   Serial.println("REC:1");
 }
 
@@ -129,7 +134,8 @@ void handleRecordButton() {
   // Ignored if currently playing.
 }
 
-// reads whatever is available on Serial and appends complete lines to the macro file while a recording is in progress
+// Reads whatever is available on Serial and appends complete lines
+// to the macro file while a recording is in progress.
 void captureSerialToFile() {
   static String lineBuffer;
   while (Serial.available() > 0) {
@@ -146,7 +152,7 @@ void captureSerialToFile() {
   }
 }
 
-//playback 
+// ---------------- Playback ----------------
 uint8_t hexPairToByte(const String &hex) {
   auto hexDigit = [](char c) -> uint8_t {
     if (c >= '0' && c <= '9') return c - '0';
@@ -158,7 +164,7 @@ uint8_t hexPairToByte(const String &hex) {
   return (hexDigit(hex[0]) << 4) | hexDigit(hex[1]);
 }
 
-// splits a comma-separated line into at most maxFields tokens
+// Splits a comma-separated line into at most maxFields tokens.
 int splitCSV(const String &line, String fields[], int maxFields) {
   int count = 0;
   int start = 0;
@@ -231,12 +237,11 @@ void playbackEvent(const String &line) {
   }
 }
 
-void playRecording() {
-  currentState = STATE_PLAYING;
-
+void playRecordingOnce(bool &stopRequested) {
   File f = LittleFS.open(MACRO_FILE_PATH, "r");
+  setSolidColor(0,255,0);
   if (!f) {
-    currentState = STATE_IDLE;
+    stopRequested = true;  // nothing to play; behave as if stop was requested
     return;
   }
 
@@ -246,33 +251,54 @@ void playRecording() {
     if (line.length() > 0) {
       playbackEvent(line);
     }
+
+    // Checked after EVERY event, not just after a full pass, so pressing
+    // the play button stops playback immediately instead of waiting for
+    // the whole (possibly looping) sequence to finish.
+    if (buttonPressedEdge(playButton)) {
+      stopRequested = true;
+      break;
+    }
   }
 
-  // Release everything at the end, in case the recording was cut off
-  // mid-press (avoids "stuck" keys or held mouse buttons).
+  f.close();
+}
+
+void stopPlayback() {
+  // Release everything, in case playback was interrupted mid-press
+  // (avoids "stuck" keys or held mouse buttons).
   Keyboard.releaseAll();
   Mouse.release(MOUSE_LEFT);
   Mouse.release(MOUSE_RIGHT);
   Mouse.release(MOUSE_MIDDLE);
-
-  f.close();
   currentState = STATE_IDLE;
+  updateIdlePulse();
 }
 
 void handlePlayButton() {
+  // Only ever called from loop() while currentState == STATE_IDLE.
   if (!buttonPressedEdge(playButton)) return;
-  if (currentState == STATE_IDLE) {
-    playRecording();
-  }
-  //ignored while recording or already playing
+  currentState = STATE_PLAYING;
+  setSolidColor(0, 255, 0);  // solid blue while playing
 }
 
-// main loop s
+// ---------------- Main loop ----------------
 void loop() {
   handleRecordButton();
-  handlePlayButton();
 
   if (currentState == STATE_RECORDING) {
     captureSerialToFile();
+
+  } else if (currentState == STATE_PLAYING) {
+    bool stopRequested = false;
+    playRecordingOnce(stopRequested);
+
+    if (stopRequested) {
+      stopPlayback();
+    }
+
+  } else {
+    handlePlayButton();
+    updateIdlePulse();
   }
 }
